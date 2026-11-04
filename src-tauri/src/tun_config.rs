@@ -3,57 +3,49 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 fn text<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
-    names.iter().find_map(|name| {
-        value
-            .get(*name)
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-    })
+    names.iter().find_map(|name| value.get(*name).and_then(Value::as_str).filter(|s| !s.is_empty()))
 }
 
 fn valid_host(host: &str) -> bool {
-    if host.contains(['/', '@', '?', '#', ' ', '\\']) {
+    if host.is_empty() || host.contains(['/', '@', '?', '#', ' ', '\\']) {
         return false;
     }
     url::Url::parse(&format!("https://{host}"))
         .is_ok_and(|url| url.host_str().is_some() && url.port().is_none())
 }
 
-#[allow(dead_code)]
-pub fn build_tun_config(session: &Value) -> Result<Value, String> {
-    build_tun_config_ext(session, false, "none", "cloudflare")
-}
-
-pub fn build_tun_config_ext(session: &Value, bypass_ru: bool, ad_block: &str, dns_mode: &str) -> Result<Value, String> {
+/// Linux sing-box 1.14+ TUN configuration for the same session contract used
+/// by the Windows desktop. Unsupported protocols are intentionally rejected.
+pub fn build_tun_config_ext(
+    session: &Value,
+    bypass_ru: bool,
+    ad_block: &str,
+    dns_mode: &str,
+) -> Result<Value, String> {
     if text(session, &["protocol"]).unwrap_or("vless") != "vless"
         || text(session, &["security"]).unwrap_or("reality") != "reality"
         || !matches!(text(session, &["network"]).unwrap_or("tcp"), "tcp" | "raw")
     {
-        return Err("Сервер использует пока не поддерживаемый протокол Windows.".into());
+        return Err("Сервер использует пока не поддерживаемый протокол Linux.".into());
     }
     let host = text(session, &["server", "endpoint"])
-        .filter(|s| valid_host(s))
+        .filter(|host| valid_host(host))
         .ok_or("Сервер вернул некорректный адрес VPN.")?;
     let sni = text(session, &["server_name", "sni"])
-        .filter(|s| valid_host(s))
+        .filter(|sni| valid_host(sni))
         .ok_or("Сервер не вернул корректное имя Reality.")?;
-    let id = text(session, &["uuid", "id"])
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or("Сервер вернул некорректный идентификатор VPN.")?;
+    let uuid = text(session, &["uuid", "id"])
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or("Сервер вернул некорректный UUID.")?;
     let key = text(session, &["public_key", "server_public_key"])
-        .filter(|key| {
-            URL_SAFE_NO_PAD
-                .decode(key)
-                .is_ok_and(|bytes| bytes.len() == 32)
-        })
+        .filter(|key| URL_SAFE_NO_PAD.decode(key).is_ok_and(|v| v.len() == 32))
         .ok_or("Сервер вернул некорректный ключ Reality.")?;
     let port = session.get("port").and_then(Value::as_u64).unwrap_or(443);
     if !(1..=65535).contains(&port) {
         return Err("Сервер вернул некорректный порт VPN.".into());
     }
     let short_id = text(session, &["short_id"]).unwrap_or("");
-    if short_id.len() > 16
-        || short_id.len() % 2 != 0
+    if short_id.len() > 16 || short_id.len() % 2 != 0
         || !short_id.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return Err("Сервер вернул некорректный Reality short ID.".into());
@@ -62,117 +54,90 @@ pub fn build_tun_config_ext(session: &Value, bypass_ru: bool, ad_block: &str, dn
     if flow != "xtls-rprx-vision" {
         return Err("Сервер использует неподдерживаемый режим VLESS.".into());
     }
-
-    let dns_servers = match dns_mode {
-        "cloudflare" => ["1.1.1.1", "1.0.0.1"],
-        "adguard" => ["94.140.14.14", "94.140.15.15"],
-        "google" => ["8.8.8.8", "8.8.4.4"],
+    let dns_ip = match dns_mode {
+        "cloudflare" => "1.1.1.1",
+        "adguard" => "94.140.14.14",
+        "google" => "8.8.8.8",
         _ => return Err("Неизвестный DNS-провайдер.".into()),
     };
-
-    let mut rules = Vec::new();
-
-    // 1. Anti-recursion: exclude VPN server host from tunnel to prevent routing loops
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        rules.push(json!({
-            "type": "field",
-            "ip": [format!("{ip}/{}", if ip.is_ipv4() { 32 } else { 128 })],
-            "outboundTag": "direct"
-        }));
-    } else {
-        rules.push(json!({
-            "type": "field",
-            "domain": [format!("full:{host}")],
-            "outboundTag": "direct"
-        }));
+    if !matches!(ad_block, "none" | "basic" | "recommended") {
+        return Err("Неизвестный режим блокировки рекламы.".into());
     }
-
-    // 2. Local/private network bypass
-    rules.push(json!({
-        "type": "field",
-        "ip": ["geoip:private"],
-        "outboundTag": "direct"
-    }));
-
-    if ad_block == "basic" || ad_block == "recommended" {
-        rules.push(json!({
-            "type": "field",
-            "domain": ["geosite:category-ads-all"],
-            "outboundTag": "block"
-        }));
-    }
-
+    let mut rules = vec![
+        json!({"protocol": "dns", "action": "hijack-dns"}),
+        json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
+    ];
+    // Windows uses geosite:category-ru/geoip:ru. Linux's suffix-based
+    // implementation is deliberately narrower; see release gate.
     if bypass_ru {
         rules.push(json!({
-            "type": "field",
-            "domain": [
-                "geosite:category-ru",
-                "geosite:category-gov-ru",
-                "domain:ru",
-                "domain:su",
-                "domain:xn--p1ai",
-                "domain:gosuslugi.ru"
-            ],
-            "outboundTag": "direct"
+            "domain_suffix": [".ru", ".su", ".xn--p1ai", "gosuslugi.ru"],
+            "action": "route",
+            "outbound": "direct"
         }));
-        rules.push(json!({
-            "type": "field",
-            "ip": ["geoip:ru"],
-            "outboundTag": "direct"
-        }));
+    }
+    if ad_block != "none" {
+        let mut blocked = vec![
+            "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+            "adnxs.com", "adsrvr.org", "criteo.com",
+        ];
+        if ad_block == "recommended" {
+            blocked.extend(["taboola.com", "outbrain.com", "scorecardresearch.com"]);
+        }
+        rules.insert(1, json!({"domain_suffix": blocked, "action": "reject"}));
     }
 
     Ok(json!({
-        "log": {"loglevel": "warning"},
+        "log": {"level": "warn", "timestamp": true},
+        "dns": {
+            "servers": [{
+                "tag": "remote",
+                "type": "udp",
+                "server": dns_ip,
+                "server_port": 53,
+                "detour": "proxy"
+            }],
+            "final": "remote",
+            "strategy": "prefer_ipv4"
+        },
         "inbounds": [{
+            "type": "tun",
             "tag": "tun",
-            "protocol": "tun",
-            "settings": {
-                "name": "ByMeVPN",
-                "mtu": 1500,
-                "gateway": ["172.31.255.1/30"],
-                "dns": dns_servers,
-                "autoSystemRoutingTable": ["0.0.0.0/0"],
-                "autoSystemWfpBlockLeak": ["dns", "misconfigtun"]
-            }
+            "interface_name": "bymevpn",
+            "address": ["172.31.255.1/30", "fdfe:dcba:9876::1/126"],
+            "mtu": 1400,
+            "auto_route": true,
+            "auto_redirect": true,
+            "strict_route": true,
+            "dns_mode": "hijack"
         }],
         "outbounds": [
             {
+                "type": "vless",
                 "tag": "proxy",
-                "protocol": "vless",
-                "settings": {
-                    "vnext": [{
-                        "address": host,
-                        "port": port,
-                        "users": [{
-                            "id": id.to_string(),
-                            "encryption": "none",
-                            "flow": flow
-                        }]
-                    }]
-                },
-                "streamSettings": {
-                    "network": "tcp",
-                    "security": "reality",
-                    "realitySettings": {
-                        "fingerprint": text(session, &["fingerprint"]).unwrap_or("chrome"),
-                        "serverName": sni,
-                        "publicKey": key,
-                        "shortId": short_id
+                "server": host,
+                "server_port": port,
+                "uuid": uuid.to_string(),
+                "flow": flow,
+                "tls": {
+                    "enabled": true,
+                    "server_name": sni,
+                    "utls": {
+                        "enabled": true,
+                        "fingerprint": text(session, &["fingerprint"]).unwrap_or("chrome")
+                    },
+                    "reality": {
+                        "enabled": true,
+                        "public_key": key,
+                        "short_id": short_id
                     }
                 }
             },
-            {
-                "tag": "direct",
-                "protocol": "freedom"
-            },
-            {
-                "tag": "block",
-                "protocol": "blackhole"
-            }
+            {"type": "direct", "tag": "direct"}
         ],
-        "routing": {
-            "domainStrategy": "IPIfNonMatch",
+        "route": {
+            "auto_detect_interface": true,
+            "final": "proxy",
             "rules": rules
         }
     }))
@@ -181,92 +146,47 @@ pub fn build_tun_config_ext(session: &Value, bypass_ru: bool, ad_block: &str, dn
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    fn session() -> serde_json::Value {
-        json!({"protocol":"vless", "server":"192.0.2.1", "port":443,
-          "uuid":"11111111-1111-4111-8111-111111111111", "security":"reality",
-          "server_name":"example.com", "public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-          "short_id":"0123456789abcdef", "network":"tcp"})
+    fn session() -> Value {
+        json!({
+            "protocol":"vless",
+            "server":"192.0.2.1",
+            "port":443,
+            "uuid":"11111111-1111-4111-8111-111111111111",
+            "security":"reality",
+            "server_name":"example.com",
+            "public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "short_id":"0123456789abcdef",
+            "network":"tcp"
+        })
     }
 
     #[test]
-    fn builds_system_tun_config_from_valid_session() {
-        let result = build_tun_config(&session()).unwrap();
-        assert_eq!(result["inbounds"][0]["protocol"], "tun");
-        assert_eq!(
-            result["inbounds"][0]["settings"]["autoSystemRoutingTable"][0],
-            "0.0.0.0/0"
-        );
-        assert_eq!(
-            result["outbounds"][0]["settings"]["vnext"][0]["address"],
-            "192.0.2.1"
-        );
-        assert_eq!(
-            result["outbounds"][0]["streamSettings"]["security"],
-            "reality"
-        );
+    fn config_routes_linux_tun_through_reality() {
+        let result = build_tun_config_ext(&session(), true, "recommended", "cloudflare").unwrap();
+        assert_eq!(result["inbounds"][0]["type"], "tun");
+        assert_eq!(result["inbounds"][0]["auto_redirect"], true);
+        assert_eq!(result["route"]["auto_detect_interface"], true);
+        assert_eq!(result["outbounds"][0]["tls"]["reality"]["enabled"], true);
+        assert_eq!(result["dns"]["servers"][0]["detour"], "proxy");
+        assert_eq!(result["route"]["final"], "proxy");
     }
 
     #[test]
-    fn rejects_unsupported_or_incomplete_sessions() {
+    fn config_rejects_invalid_sessions_and_settings() {
         let mut invalid = session();
         invalid["protocol"] = json!("hysteria2");
-        assert!(build_tun_config(&invalid).is_err());
+        assert!(build_tun_config_ext(&invalid, false, "none", "cloudflare").is_err());
         invalid = session();
         invalid["uuid"] = json!("broken");
-        assert!(build_tun_config(&invalid).is_err());
+        assert!(build_tun_config_ext(&invalid, false, "none", "cloudflare").is_err());
         invalid = session();
-        invalid["public_key"] = json!("");
-        assert!(build_tun_config(&invalid).is_err());
+        invalid["public_key"] = json!("broken");
+        assert!(build_tun_config_ext(&invalid, false, "none", "cloudflare").is_err());
         invalid = session();
-        invalid["server"] = json!("example.com/path");
-        assert!(build_tun_config(&invalid).is_err());
-    }
-
-    #[test]
-    fn validates_dns_mode_and_generates_provider_addresses() {
-        let config = build_tun_config_ext(&session(), true, "none", "adguard").unwrap();
-        assert_eq!(config["inbounds"][0]["settings"]["dns"][0], "94.140.14.14");
-        assert!(build_tun_config_ext(&session(), true, "none", "untrusted").is_err());
-    }
-
-    #[test]
-    fn xray_accepts_generated_synthetic_configuration() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../vendor/runtime/windows-x64/xray.exe");
-        let path = std::env::temp_dir().join(format!("bymevpn-test-{}.json", Uuid::new_v4()));
-        std::fs::write(
-            &path,
-            serde_json::to_vec(&build_tun_config(&session()).unwrap()).unwrap(),
-        )
-        .unwrap();
-        let result = std::process::Command::new(&root)
-            .args(["run", "-test", "-config"])
-            .arg(&path)
-            .output();
-        let _ = std::fs::remove_file(path);
-        let output = result.expect("Verified development Xray runtime must be available");
-        assert!(
-            output.status.success(),
-            "Xray rejected the generated test configuration"
-        );
-
-        let path_ext = std::env::temp_dir().join(format!("bymevpn-test-ext-{}.json", Uuid::new_v4()));
-        std::fs::write(
-            &path_ext,
-            serde_json::to_vec(&build_tun_config_ext(&session(), true, "recommended", "cloudflare").unwrap()).unwrap(),
-        )
-        .unwrap();
-        let result_ext = std::process::Command::new(&root)
-            .args(["run", "-test", "-config"])
-            .arg(&path_ext)
-            .output();
-        let _ = std::fs::remove_file(path_ext);
-        let output_ext = result_ext.expect("Verified development Xray runtime must be available");
-        assert!(
-            output_ext.status.success(),
-            "Xray rejected the generated extended configuration with RU bypass and ad-block"
-        );
+        invalid["server"] = json!("host/path");
+        assert!(build_tun_config_ext(&invalid, false, "none", "cloudflare").is_err());
+        assert!(build_tun_config_ext(&session(), false, "no-such-filter", "cloudflare").is_err());
+        assert!(build_tun_config_ext(&session(), false, "none", "malicious").is_err());
     }
 }

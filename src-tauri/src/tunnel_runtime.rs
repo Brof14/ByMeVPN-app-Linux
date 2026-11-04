@@ -1,33 +1,63 @@
-use sha2::{Digest, Sha256};
-use std::{fs::File, io::Read, path::Path};
+use std::{
+    os::unix::fs::{MetadataExt, PermissionsExt},
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-// Embedded at build time from the SHA256-verified upstream Xray archive.
-const XRAY_SHA256: &str = env!("BYMEVPN_XRAY_SHA256");
-const WINTUN_SHA256: &str = "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce";
+const APPROVED: [&str; 2] = ["/usr/bin/sing-box", "/usr/local/bin/sing-box"];
 
-fn verify_file(path: &Path, expected: &str) -> Result<(), String> {
-    let mut file =
-        File::open(path).map_err(|_| "Не найден проверенный компонент VPN.".to_string())?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let count = file
-            .read(&mut buffer)
-            .map_err(|_| "Не удалось проверить компонент VPN.".to_string())?;
-        if count == 0 {
-            break;
+pub fn find_runtime() -> Result<PathBuf, String> {
+    for path in APPROVED {
+        let binary = PathBuf::from(path);
+        if binary.exists() {
+            verify_runtime(binary.parent().expect("absolute engine path"))?;
+            return Ok(binary);
         }
-        digest.update(&buffer[..count]);
     }
-    if format!("{:x}", digest.finalize()) != expected {
-        return Err("Компонент VPN изменён или повреждён. Подключение не запускалось.".into());
-    }
-    Ok(())
+    Err("sing-box не установлен. Установите sing-box 1.14+ из официального репозитория.".into())
 }
 
+/// Reject executable substitution. TUN privileges must be explicitly configured
+/// by the system administrator on a root-owned file, never on our GUI.
 pub fn verify_runtime(directory: &Path) -> Result<(), String> {
-    verify_file(&directory.join("xray.exe"), XRAY_SHA256)?;
-    verify_file(&directory.join("wintun.dll"), WINTUN_SHA256)
+    let binary = directory.join("sing-box");
+    let resolved = binary.canonicalize()
+        .map_err(|_| "Не найден системный sing-box.".to_string())?;
+    if !APPROVED.iter().any(|p| resolved == Path::new(p)) {
+        return Err("Неожиданный путь VPN-движка. Ссылки на сторонние исполняемые файлы запрещены.".into());
+    }
+    let meta = std::fs::metadata(&resolved)
+        .map_err(|e| format!("Невозможно проверить sing-box: {e}"))?;
+    if !meta.is_file() || meta.uid() != 0 || meta.permissions().mode() & 0o022 != 0 {
+        return Err("sing-box должен принадлежать root и быть недоступным для записи обычным пользователям.".into());
+    }
+    let ver = Command::new(&resolved).arg("version").output()
+        .map_err(|e| format!("Не удалось проверить версию sing-box: {e}"))?;
+    if !ver.status.success() {
+        return Err("sing-box не запускается. Проверьте системную установку.".into());
+    }
+    let stdout = String::from_utf8_lossy(&ver.stdout);
+    let version = stdout.split_whitespace()
+        .find(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .ok_or("Неизвестная версия sing-box.")?;
+    let parts: Vec<_> = version.split('.').take(2)
+        .map(|s| s.parse::<u32>())
+        .collect();
+    if parts.len() != 2 || parts[0].as_ref().is_err() || parts[1].as_ref().is_err()
+        || *parts[0].as_ref().unwrap() < 1
+        || (*parts[0].as_ref().unwrap() == 1 && *parts[1].as_ref().unwrap() < 14)
+    {
+        return Err("Для Linux TUN требуется sing-box версии 1.14 или новее.".into());
+    }
+    let caps = Command::new("getcap").arg(&resolved).output()
+        .map_err(|_| "Не найден getcap. Установите libcap2-bin.".to_string())?;
+    let text = String::from_utf8_lossy(&caps.stdout);
+    if !caps.status.success() || !text.contains("cap_net_admin")
+        || !text.contains("cap_net_raw") || !(text.contains("=ep") || text.contains("+ep"))
+    {
+        return Err("sing-box нужны CAP_NET_ADMIN и CAP_NET_RAW: sudo setcap cap_net_admin,cap_net_raw+ep /usr/bin/sing-box".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -35,20 +65,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn verified_runtime_contains_the_pinned_official_binaries() {
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../vendor/runtime/windows-x64");
-        assert!(verify_runtime(&dir).is_ok());
-    }
-
-    #[test]
-    fn runtime_is_rejected_when_files_are_missing_or_changed() {
-        let dir =
-            std::env::temp_dir().join(format!("bymevpn-runtime-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&dir).unwrap();
-        std::fs::write(dir.join("xray.exe"), b"tampered").unwrap();
-        assert!(verify_runtime(&dir).is_err());
-        std::fs::remove_file(dir.join("xray.exe")).unwrap();
-        std::fs::remove_dir(dir).unwrap();
+    fn rejects_untrusted_executable_paths() {
+        assert!(verify_runtime(Path::new("/tmp")).is_err());
     }
 }
