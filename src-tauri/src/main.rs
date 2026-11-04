@@ -1,0 +1,84 @@
+mod api_transport;
+mod egress;
+mod service;
+mod tun_config;
+mod tunnel_runtime;
+
+use tauri::{Manager, RunEvent};
+#[cfg(all(debug_assertions, windows))]
+use tauri_plugin_deep_link::DeepLinkExt;
+
+fn main() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_deep_link::init())
+        .setup(|app| {
+            if let Ok(dir) = app.path().app_data_dir() {
+                let stale_config = dir.join("active_tunnel.json");
+                if stale_config.exists() {
+                    let _ = std::fs::remove_file(stale_config);
+                }
+            }
+            #[cfg(all(debug_assertions, windows))]
+            app.deep_link().register_all()?;
+            // Native tunnel surveillance must continue even if the WebView is
+            // minimized/hidden; frontend visibilitychange stops UI polling.
+            // This detects Xray exits and observed egress loss. A kernel WFP
+            // Kill Switch is still required for leak-free guarantees.
+            let watchdog = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(8));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    let _ = service::vpn_status(watchdog.state::<service::AppState>()).await;
+                }
+            });
+            Ok(())
+        })
+        .manage(service::AppState::default())
+        .invoke_handler(tauri::generate_handler![
+            api_transport::api_transport_encrypted,
+            service::auth_login,
+            service::auth_register,
+            service::auth_google,
+            service::telegram_create_session,
+            service::telegram_check_session,
+            service::telegram_cancel_session,
+            service::auth_logout,
+            service::restore_session,
+            service::account_snapshot,
+            service::get_servers,
+            service::get_plans,
+            service::activate_trial,
+            service::create_payment,
+            service::check_payment,
+            service::get_pending_payment,
+            service::delete_device,
+            service::vpn_start,
+            service::vpn_stop,
+            service::vpn_status,
+            service::get_settings,
+            service::save_setting,
+            service::startup_enabled,
+            service::set_startup,
+            service::window_minimize,
+            service::window_toggle_maximize,
+            service::window_close,
+            service::open_external_url
+        ])
+        .build(tauri::generate_context!())
+        .expect("ByMeVPN failed to start")
+        .run(|app_handle, event| {
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                if let Some(state) = app_handle.try_state::<service::AppState>() {
+                    if let Ok(mut lock) = state.tunnel.lock() {
+                        if let Some(mut active) = lock.take() {
+                            let _ = active.child.kill();
+                            let _ = active.child.wait();
+                            let _ = std::fs::remove_file(&active.config_path);
+                        }
+                    }
+                }
+            }
+        });
+}

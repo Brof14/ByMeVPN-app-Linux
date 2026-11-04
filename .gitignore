@@ -1,0 +1,14 @@
+/src-tauri/target/
+/src-tauri/.tauri/
+/src-tauri/gen/
+/runtime/
+/vendor/downloads/
+/vendor/runtime/
+*.exe
+*.msi
+/dist/
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
