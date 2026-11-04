@@ -1,6 +1,6 @@
 /**
  * ByMeVPN Desktop Client - Production Frontend Engine
- * Parity: ByMeVPN Android V2 & Windows Architecture
+ * Parity: ByMeVPN Android V2 & Linux Architecture
  */
 
 // Safe Tauri IPC Bridge
@@ -14,7 +14,7 @@ const invoke = async (cmd, args = {}) => {
   }
   // Production must never silently simulate auth, settings or VPN connection.
   // The dedicated qa-preview/ build has its own fixtures and does not ship.
-  throw new Error('Приложение ByMeVPN должно быть открыто через Windows-клиент.');
+  throw new Error('Приложение ByMeVPN должно быть открыто через Linux-клиент.');
 };
 
 // State Store
@@ -160,7 +160,7 @@ const I18N = {
     renew: 'Продлить',
     manage_subscription: 'Управлять подпиской',
     devices: 'Устройства',
-    this_pc: 'Windows • Этот компьютер',
+    this_pc: 'Linux • Этот компьютер',
     online: 'Онлайн',
     current_device: 'Текущее устройство',
     seen_hours: 'Был(а) 2 часа назад',
@@ -293,7 +293,7 @@ const I18N = {
     renew: 'Extend',
     manage_subscription: 'Manage subscription',
     devices: 'Devices',
-    this_pc: 'Windows • This PC',
+    this_pc: 'Linux • This PC',
     online: 'Online',
     current_device: 'Current device',
     seen_hours: 'Seen 2 hours ago',
@@ -305,7 +305,7 @@ const I18N = {
     delete_account: 'Request Account Deletion',
     set_general_title: 'General',
     set_general_desc: 'Comfortable experience with ByMeVPN',
-    autostart_title: 'Launch on Windows startup',
+    autostart_title: 'Launch on Linux startup',
     autostart_desc: 'ByMeVPN starts automatically with your system',
     background_title: 'Stay connected in background',
     background_desc: 'Background VPN mode is not available yet. Closing the app disconnects.',
@@ -1048,7 +1048,7 @@ async function toggleVpn() {
       return;
     }
 
-    showToast('Запуск туннеля Xray + Wintun...');
+    showToast('Запуск туннеля sing-box + TUN...');
     try {
       const code = state.selectedServer.code === 'auto' ? null : state.selectedServer.code;
       const metrics = await invoke('vpn_start', { nodeCode: code });
@@ -1225,7 +1225,7 @@ const TOAST_EN = Object.freeze({
   "Не удалось проверить подписку. Обновите аккаунт и повторите попытку.": "Could not verify your subscription. Refresh the account and retry.",
   "Для подключения требуется активный доступ (3 дня бесплатно или тариф).": "You need an active subscription or free trial to connect.",
   "Не удалось получить совместимые серверы. Проверьте сеть и обновите список.": "No compatible servers available. Check your network and refresh.",
-  "Запуск туннеля Xray + Wintun...": "Starting Xray + Wintun tunnel...",
+  "Запуск туннеля sing-box + TUN...": "Starting sing-box + TUN tunnel...",
   "Подключение проверено и установлено": "VPN connection established and verified.",
   "Соединение VPN прервано. Защита не подтверждена.": "VPN disconnected. Protection is not verified.",
   "Устройство успешно отключено": "Device disconnected.",
@@ -1752,7 +1752,7 @@ async function handlePayYooKassa() {
   state.paymentBusy = true;
   updatePricingMatrixUi();
   try {
-    // Resume the exact server invoice after a Windows restart. Windows
+    // Resume the exact server invoice after a Linux restart. Windows
     // Credential Manager stores the invoice under the signed-in user.
     const recovered = await invoke('get_pending_payment');
     if (epoch !== state.sessionEpoch) return;
@@ -1965,14 +1965,14 @@ function openLegalModal(type) {
     title.textContent = uiText('Конфиденциальность и обработка данных', 'Privacy and data handling');
     body.innerHTML = en ? `
       <p><strong>About this notice</strong> This is an in-app summary, not a replacement for the full published privacy policy.</p>
-      <p><strong>Account</strong> Login tokens are stored in Windows Credential Manager. Your account, subscription and device details are provided by the ByMeVPN backend.</p>
-      <p><strong>VPN traffic</strong> Xray routes eligible traffic through the selected VPN endpoint. Local routing exceptions may send supported Russian services directly, if enabled.</p>
+      <p><strong>Account</strong> Login tokens are stored in Linux Secret Service. Your account, subscription and device details are provided by the ByMeVPN backend.</p>
+      <p><strong>VPN traffic</strong> sing-box routes eligible traffic through the selected VPN endpoint. Local routing exceptions may send supported Russian services directly, if enabled.</p>
       <p><strong>Verification</strong> Comprehensive DNS, IPv6 and server logging claims have not been independently verified. No unqualified zero-logs or total anonymity guarantee is made.</p>
       <p><strong>Contact</strong> Use ByMeVPN Support in Telegram for privacy or data requests.</p>
     ` : `
       <p><strong>Об этом уведомлении</strong> Это краткое описание, не заменяющее полную опубликованную политику конфиденциальности.</p>
-      <p><strong>Аккаунт</strong> Токены входа хранятся в Windows Credential Manager. Данные аккаунта, подписки и устройств поступают с сервера ByMeVPN.</p>
-      <p><strong>VPN-трафик</strong> Xray направляет подходящий трафик через выбранный VPN-сервер. При включённом обходе поддерживаемые российские сервисы могут открываться напрямую.</p>
+      <p><strong>Аккаунт</strong> Токены входа хранятся в Linux Secret Service. Данные аккаунта, подписки и устройств поступают с сервера ByMeVPN.</p>
+      <p><strong>VPN-трафик</strong> sing-box направляет подходящий трафик через выбранный VPN-сервер. При включённом обходе поддерживаемые российские сервисы могут открываться напрямую.</p>
       <p><strong>Проверка</strong> Полная защита DNS/IPv6 и серверная политика логирования ещё не прошли независимую проверку. Гарантии абсолютной анонимности или Zero Logs не заявляются.</p>
       <p><strong>Обращения</strong> По вопросам персональных данных используйте поддержку ByMeVPN в Telegram.</p>
     `;
