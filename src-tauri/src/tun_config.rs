@@ -65,6 +65,7 @@ pub fn build_tun_config_ext(
     }
     let mut rules = vec![
         json!({"protocol": "dns", "action": "hijack-dns"}),
+        json!({"action": "sniff"}),
         json!({"ip_is_private": true, "action": "route", "outbound": "direct"}),
     ];
     // Windows uses geosite:category-ru/geoip:ru. Linux's suffix-based
@@ -90,13 +91,22 @@ pub fn build_tun_config_ext(
     Ok(json!({
         "log": {"level": "warn", "timestamp": true},
         "dns": {
-            "servers": [{
-                "tag": "remote",
-                "type": "udp",
-                "server": dns_ip,
-                "server_port": 53,
-                "detour": "proxy"
-            }],
+            "servers": [
+                {
+                    "tag": "remote",
+                    "type": "udp",
+                    "server": dns_ip,
+                    "server_port": 53,
+                    "detour": "proxy"
+                },
+                {
+                    "tag": "bootstrap",
+                    "type": "udp",
+                    "server": "1.1.1.1",
+                    "server_port": 53,
+                    "detour": "direct"
+                }
+            ],
             "final": "remote",
             "strategy": "prefer_ipv4"
         },
@@ -137,6 +147,7 @@ pub fn build_tun_config_ext(
         ],
         "route": {
             "auto_detect_interface": true,
+            "default_domain_resolver": "bootstrap",
             "final": "proxy",
             "rules": rules
         }
