@@ -200,4 +200,29 @@ mod tests {
         assert!(build_tun_config_ext(&session(), false, "no-such-filter", "cloudflare").is_err());
         assert!(build_tun_config_ext(&session(), false, "none", "malicious").is_err());
     }
+
+    #[test]
+    fn sing_box_accepts_generated_linux_config() {
+        // CI provides a SHA256-pinned upstream sing-box. Local tests can run
+        // without installing a privileged VPN engine.
+        let exe = match std::env::var("BYMEVPN_TEST_SINGBOX") {
+            Ok(path) => path,
+            Err(_) => return,
+        };
+        let path = std::env::temp_dir().join(format!("bymevpn-linux-{}.json", Uuid::new_v4()));
+        let config = build_tun_config_ext(&session(), true, "recommended", "cloudflare").unwrap();
+        std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+        let output = std::process::Command::new(&exe)
+            .args(["check", "-c"])
+            .arg(&path)
+            .output()
+            .expect("sing-box test binary must launch");
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            output.status.success(),
+            "sing-box rejected generated configuration: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
 }
