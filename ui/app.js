@@ -1752,7 +1752,7 @@ async function handlePayYooKassa() {
   state.paymentBusy = true;
   updatePricingMatrixUi();
   try {
-    // Resume the exact server invoice after a Linux restart. Windows
+    // Resume the exact server invoice after a Linux restart. Linux
     // Credential Manager stores the invoice under the signed-in user.
     const recovered = await invoke('get_pending_payment');
     if (epoch !== state.sessionEpoch) return;
