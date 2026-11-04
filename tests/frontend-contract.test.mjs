@@ -92,9 +92,9 @@ test('production UI fails closed without Tauri rather than pretending to use a V
   });
   runInContext(source, context);
   await assert.rejects(runInContext("invoke('vpn_start')", context),
-    /должно быть открыто через Windows-клиент/);
+    /должно быть открыто через Linux-клиент/);
   await assert.rejects(runInContext("invoke('auth_login')", context),
-    /должно быть открыто через Windows-клиент/);
+    /должно быть открыто через Linux-клиент/);
 });
 
 test('Android V2 exact SKU prices, device counts and gift durations are confirmed', async () => {
@@ -286,7 +286,7 @@ test('privacy and service summaries are bilingual and never promise unaudited ze
   assert.doesNotMatch(content.english, /We NEVER log/);
 });
 
-test('the Windows shield is byte-for-byte the approved Android V2 drawable', () => {
+test('the Linux shield is byte-for-byte the approved Android V2 drawable', () => {
   const image = readFileSync(new URL('../ui/assets/byme-connect-shield.png', import.meta.url));
   const sha = createHash('sha1')
     .update(Buffer.from(`blob ${image.length}\0`))
