@@ -10,7 +10,7 @@
 <body>
   <div id="app" class="app-root">
 
-    <!-- Custom Windows Titlebar -->
+    <!-- Custom Linux Titlebar -->
     <header class="window-titlebar" data-tauri-drag-region>
       <div class="window-title-left" data-tauri-drag-region>
         <div class="titlebar-logo">
@@ -851,7 +851,7 @@
                       <span data-i18n="background_desc">Фоновая работа в разработке; закрытие окна сейчас отключает VPN</span>
                     </div>
                     <label class="switch-control">
-                      <input type="checkbox" id="set-background" disabled title="Фоновый режим появится после реализации Windows Service" />
+                      <input type="checkbox" id="set-background" disabled title="Фоновый режим будет доступен после реализации безопасного Linux helper" />
                       <span class="switch-slider"></span>
                     </label>
                   </div>
@@ -1107,7 +1107,7 @@
                 <div class="advanced-header-group">
                   <span class="advanced-gear-icon">🛠</span>
                   <div>
-                    <h3 style="font-size: 17px; margin-bottom: 4px;">Параметры ядра Xray & Wintun</h3>
+                    <h3 style="font-size: 17px; margin-bottom: 4px;">Параметры движка sing-box и TUN</h3>
                     <span style="font-size: 12px; color: var(--text-secondary);">Низкоуровневая конфигурация системного туннеля</span>
                   </div>
                 </div>
@@ -1115,18 +1115,18 @@
 
                 <div class="advanced-param-row">
                   <div>
-                    <strong>Сетевой драйвер Wintun</strong>
-                    <span>Высокопроизводительный драйвер TUN для Windows x64</span>
+                    <strong>Сетевой интерфейс TUN</strong>
+                    <span>Linux TUN с автоматической маршрутизацией</span>
                   </div>
-                  <span class="badge-tech-pill">ByMeVPN (MTU 1500)</span>
+                  <span class="badge-tech-pill">ByMeVPN (MTU 1400)</span>
                 </div>
 
                 <div class="card-divider-line"></div>
 
                 <div class="advanced-param-row">
                   <div>
-                    <strong>Защита от утечек DNS (WFP)</strong>
-                    <span>Защита от утечек зависит от конфигурации Windows; требуется проверка</span>
+                    <strong>Защита DNS и IPv6 (TUN)</strong>
+                    <span>Безопасность маршрутов и DNS требует проверки на Linux</span>
                   </div>
                   <span class="badge-tech-pill">Проверка не завершена</span>
                 </div>
@@ -1136,9 +1136,9 @@
                 <div class="advanced-param-row">
                   <div>
                     <strong>Защита от рекурсии маршрутов</strong>
-                    <span>Безусловный прямой маршрут (direct) для собственного хоста сервера</span>
+                    <span>auto_detect_interface предотвращает рекурсивную маршрутизацию</span>
                   </div>
-                  <span class="badge-tech-pill">Настроено в Xray</span>
+                  <span class="badge-tech-pill">Настроено в sing-box</span>
                 </div>
 
                 <div class="card-divider-line"></div>
@@ -1161,7 +1161,7 @@
                     <strong>Шлюз локальных сетей (Bypass LAN)</strong>
                     <span>Локальные адреса RFC 1918 (192.168.x.x, 10.x.x.x) открываются напрямую</span>
                   </div>
-                  <span class="badge-tech-pill active">geoip:private</span>
+                  <span class="badge-tech-pill active">ip_is_private</span>
                 </div>
               </div>
             </div>
