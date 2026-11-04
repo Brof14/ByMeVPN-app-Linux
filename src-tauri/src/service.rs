@@ -1,20 +1,18 @@
 use crate::api_transport::{send_to_bases, API_BASES};
 use crate::egress::verify_egress;
 use crate::tun_config::build_tun_config_ext;
-use crate::tunnel_runtime::verify_runtime;
+use crate::tunnel_runtime::find_runtime;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use keyring::Entry;
 use reqwest::{Client, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf, sync::Mutex, time::Duration};
+use std::{fs, io::Write, os::unix::fs::OpenOptionsExt, path::PathBuf, sync::Mutex, time::Duration};
 use tauri::{AppHandle, Manager, State};
 use url::Url;
 use uuid::Uuid;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 const KEYRING_SERVICE: &str = "ByMeVPN";
 const ACCESS_KEY: &str = "access_token";
@@ -117,12 +115,12 @@ fn http(app: &AppHandle) -> Result<Client, String> {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert("X-HWID", reqwest::header::HeaderValue::from_str(&install_id(app)?)
         .map_err(|_| "Некорректный идентификатор устройства.")?);
-    headers.insert("X-Device-OS", reqwest::header::HeaderValue::from_static("Windows"));
-    headers.insert("X-Ver-OS", reqwest::header::HeaderValue::from_static("10+"));
-    headers.insert("X-Device-Model", reqwest::header::HeaderValue::from_static("Windows PC"));
+    headers.insert("X-Device-OS", reqwest::header::HeaderValue::from_static("Linux"));
+    headers.insert("X-Ver-OS", reqwest::header::HeaderValue::from_static("Linux"));
+    headers.insert("X-Device-Model", reqwest::header::HeaderValue::from_static("Linux PC"));
     Client::builder()
         .default_headers(headers)
-        .user_agent(concat!("ByMeVPN-Windows/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("ByMeVPN-Linux/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
@@ -131,7 +129,7 @@ fn http(app: &AppHandle) -> Result<Client, String> {
 }
 
 fn entry(name: &str) -> Result<Entry, String> {
-    Entry::new(KEYRING_SERVICE, name).map_err(|e| format!("Windows Credential Manager: {e}"))
+    Entry::new(KEYRING_SERVICE, name).map_err(|e| format!("Secret Service: {e}"))
 }
 
 fn read_secret(name: &str) -> Option<String> {
@@ -141,7 +139,7 @@ fn read_secret(name: &str) -> Option<String> {
 fn save_secret(name: &str, value: &str) -> Result<(), String> {
     entry(name)?
         .set_password(value)
-        .map_err(|e| format!("Не удалось сохранить токен в Windows Credential Manager: {e}"))
+        .map_err(|e| format!("Не удалось сохранить токен в Secret Service: {e}"))
 }
 
 fn clear_secrets() {
@@ -476,7 +474,7 @@ pub async fn telegram_login(
         .map_err(|e| format!("Не удалось проверить ссылку Telegram: {e}"))?;
     let response = client
         .get(url.clone())
-        .header("User-Agent", "ByMeVPN/Windows")
+        .header("User-Agent", "ByMeVPN/Linux")
         .send()
         .await
         .map_err(|_| {
@@ -1053,7 +1051,7 @@ pub async fn activate_trial(app: AppHandle) -> Result<Subscription, String> {
         "/subscription/trial",
         Some(json!({
             "install_id": id,
-            "device_model": "Windows PC"
+            "device_model": "Linux PC"
         })),
         true,
         false,
@@ -1188,33 +1186,11 @@ pub async fn delete_account(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-pub fn get_runtime_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let mut candidates = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            candidates.push(parent.join("vendor/runtime/windows-x64"));
-            candidates.push(parent.join("runtime/windows-x64"));
-            candidates.push(parent.join("vendor/runtime"));
-            candidates.push(parent.to_path_buf());
-        }
-    }
-    candidates.push(PathBuf::from("vendor/runtime/windows-x64"));
-    candidates.push(PathBuf::from("../vendor/runtime/windows-x64"));
-    if let Ok(res) = app.path().resource_dir() {
-        candidates.push(res.join("vendor/runtime/windows-x64"));
-        candidates.push(res.join("runtime/windows-x64"));
-        candidates.push(res.join("vendor/runtime"));
-        candidates.push(res.clone());
-    }
-
-    for dir in candidates {
-        if dir.exists() && dir.join("xray.exe").exists() {
-            if verify_runtime(&dir).is_ok() {
-                return Ok(dir);
-            }
-        }
-    }
-    Err("Не найден проверенный компонент Xray (xray.exe / wintun.dll).".into())
+pub fn get_runtime_dir(_app: &AppHandle) -> Result<PathBuf, String> {
+    find_runtime()?
+        .parent()
+        .map(|dir| dir.to_path_buf())
+        .ok_or_else(|| "Не удалось определить путь VPN-движка.".to_string())
 }
 
 fn default_settings() -> Value {
@@ -1240,7 +1216,7 @@ fn validate_setting(key: &str, value: &Value) -> Result<(), String> {
         }
         "stayConnectedInBackground" | "killSwitch" => {
             if value != &Value::Bool(false) {
-                return Err("Функция будет доступна после проверки безопасности Windows.".into());
+                return Err("Функция недоступна до завершения проверок безопасности Linux.".into());
             }
         }
         "adBlock" => {
@@ -1380,49 +1356,39 @@ pub async fn vpn_start(
     let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
     let config_path = app_dir.join("active_tunnel.json");
-    fs::write(
-        &config_path,
-        serde_json::to_vec_pretty(&xray_config).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    // VPN session contains secret connection credentials; create with mode 0600.
+    let mut config_file = fs::OpenOptions::new()
+        .write(true).create_new(true).mode(0o600)
+        .open(&config_path)
+        .map_err(|e| format!("Не удалось создать защищённый конфиг VPN: {e}"))?;
+    config_file.write_all(
+        &serde_json::to_vec_pretty(&xray_config).map_err(|e| e.to_string())?,
+    ).map_err(|e| format!("Не удалось записать конфиг VPN: {e}"))?;
+    drop(config_file);
 
-    #[cfg(windows)]
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    #[cfg(not(windows))]
-    const CREATE_NO_WINDOW: u32 = 0;
-
-    let test_res = std::process::Command::new(runtime_dir.join("xray.exe"))
-        .current_dir(&runtime_dir)
-        .env("XRAY_LOCATION_ASSET", &runtime_dir)
-        .args(["run", "-test", "-config"])
+    let test_res = std::process::Command::new(runtime_dir.join("sing-box"))
+        .args(["check", "-c"])
         .arg(&config_path)
-        .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .map_err(|e| format!("Не удалось проверить конфигурацию Xray: {e}"))?;
-
+        .map_err(|e| format!("Не удалось проверить конфигурацию sing-box: {e}"))?;
     if !test_res.status.success() {
         let _ = fs::remove_file(&config_path);
-        // Xray emits actionable parser/config diagnostics on stderr.
         let cause = String::from_utf8_lossy(&test_res.stderr);
         let detail: String = cause.trim().chars().take(500).collect();
         return Err(if detail.is_empty() {
-            format!("Конфигурация Xray отклонена (код {:?}).", test_res.status.code())
+            format!("Конфигурация sing-box отклонена (код {:?}).", test_res.status.code())
         } else {
-            format!("Ошибка конфигурации Xray: {detail}")
+            format!("Ошибка конфигурации sing-box: {detail}")
         });
     }
-
-    let mut child = match std::process::Command::new(runtime_dir.join("xray.exe"))
-        .current_dir(&runtime_dir)
-        .env("XRAY_LOCATION_ASSET", &runtime_dir)
-        .args(["run", "-config"])
+    let mut child = match std::process::Command::new(runtime_dir.join("sing-box"))
+        .args(["run", "-c"])
         .arg(&config_path)
-        .creation_flags(CREATE_NO_WINDOW)
         .spawn() {
             Ok(child) => child,
             Err(e) => {
                 let _ = fs::remove_file(&config_path);
-                return Err(format!("Не удалось запустить Xray: {e}"));
+                return Err(format!("Не удалось запустить sing-box: {e}"));
             }
         };
 
@@ -1432,11 +1398,11 @@ pub async fn vpn_start(
         tokio::time::sleep(Duration::from_millis(750)).await;
         match child.try_wait() {
             Ok(Some(_)) => {
-                last_error = "Xray завершился до установления туннеля.".into();
+                last_error = "sing-box завершился до установления туннеля.".into();
                 break;
             }
             Err(_) => {
-                last_error = "Не удалось проверить процесс Xray.".into();
+                last_error = "Не удалось проверить процесс sing-box.".into();
                 break;
             }
             Ok(None) => {}
@@ -1498,13 +1464,13 @@ pub async fn vpn_stop(app: AppHandle, state: State<'_, AppState>) -> Result<(), 
         let mut lock = state.tunnel.lock().map_err(|e| e.to_string())?;
         if let Some(active) = lock.as_mut() {
             let already_stopped = active.child.try_wait()
-                .map_err(|e| format!("Не удалось проверить Xray: {e}"))?.is_some();
+                .map_err(|e| format!("Не удалось проверить sing-box: {e}"))?.is_some();
             if !already_stopped {
                 // Do not clear connected state until the OS confirms termination.
                 active.child.kill().map_err(|e|
                     format!("Не удалось остановить VPN-процесс: {e}"))?;
                 active.child.wait().map_err(|e|
-                    format!("Не удалось дождаться остановки Xray: {e}"))?;
+                    format!("Не удалось дождаться остановки sing-box: {e}"))?;
             }
         }
         lock.take()
@@ -1541,8 +1507,8 @@ pub async fn vpn_status(state: State<'_, AppState>) -> Result<TunnelMetrics, Str
                 if observed_ok {
                     active.last_egress_verified = std::time::Instant::now();
                 } else {
-                    // Fail closed in the UI. Xray termination owns TUN cleanup.
-                    // This does NOT replace a genuine kernel WFP Kill Switch.
+                    // Fail closed in the UI. sing-box termination owns TUN cleanup.
+                    // This does NOT replace a genuine kernel-level kill switch.
                     let _ = active.child.kill();
                     let _ = active.child.wait();
                     if let Some(active) = lock.take() {
@@ -1589,69 +1555,69 @@ pub async fn vpn_status(state: State<'_, AppState>) -> Result<TunnelMetrics, Str
     })
 }
 
-#[cfg(windows)]
+fn autostart_path() -> Result<PathBuf, String> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .ok_or("Не удалось определить домашний каталог Linux.")?;
+    Ok(base.join("autostart").join("bymevpn.desktop"))
+}
+
 fn startup_value() -> Result<String, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("Не удалось определить путь приложения: {e}"))?;
-    Ok(format!("\"{}\"", exe.display()))
+    let raw = exe.to_string_lossy();
+    if raw.chars().any(char::is_control) {
+        return Err("Недопустимый путь исполняемого файла.".into());
+    }
+    let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!(
+        "[Desktop Entry]\nType=Application\nName=ByMeVPN\nExec=\"{escaped}\"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
+    ))
+}
+
+fn read_autostart(path: &std::path::Path) -> Result<Option<String>, String> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Не удалось прочитать автозапуск: {e}")),
+        Ok(meta) if meta.is_file() && !meta.file_type().is_symlink() => {
+            fs::read_to_string(path).map(Some)
+                .map_err(|e| format!("Не удалось прочитать автозапуск: {e}"))
+        }
+        Ok(_) => Err("Небезопасная запись автозапуска: ожидается обычный файл.".into()),
+    }
 }
 
 #[tauri::command]
 pub fn startup_enabled() -> Result<bool, String> {
-    #[cfg(windows)]
-    {
-        use winreg::{enums::HKEY_CURRENT_USER, RegKey};
-        let key = match RegKey::predef(HKEY_CURRENT_USER)
-            .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run")
-        {
-            Ok(key) => key,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(format!("Не удалось прочитать автозапуск: {e}")),
-        };
-        let current: String = match key.get_value("ByMeVPN.Desktop") {
-            Ok(value) => value,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(format!("Не удалось прочитать запись автозапуска: {e}")),
-        };
-        Ok(current == startup_value()?)
-    }
-    #[cfg(not(windows))]
-    {
-        Err("Автозапуск доступен только в Windows.".into())
-    }
+    Ok(read_autostart(&autostart_path()?)?.as_deref() == Some(startup_value()?.as_str()))
 }
 
 #[tauri::command]
 pub fn set_startup(enabled: bool) -> Result<(), String> {
-    #[cfg(windows)]
-    {
-        use winreg::{enums::HKEY_CURRENT_USER, RegKey};
-        let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
-            .create_subkey(r"Software\Microsoft\Windows\CurrentVersion\Run")
-            .map_err(|e| format!("Не удалось открыть автозапуск: {e}"))?;
-        let expected = startup_value()?;
-        let current: String = match key.get_value("ByMeVPN.Desktop") {
-            Ok(value) => value,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(format!("Не удалось прочитать запись автозапуска: {e}")),
-        };
-        if !current.is_empty() && current != expected {
+    let path = autostart_path()?;
+    let value = startup_value()?;
+    let current = read_autostart(&path)?;
+    if let Some(ref contents) = current {
+        if contents != &value {
             return Err("Запись автозапуска принадлежит другой копии ByMeVPN.".into());
         }
-        if enabled {
-            key.set_value("ByMeVPN.Desktop", &expected)
-                .map_err(|e| format!("Не удалось включить автозапуск: {e}"))?;
-        } else if !current.is_empty() {
-            key.delete_value("ByMeVPN.Desktop")
-                .map_err(|e| format!("Не удалось выключить автозапуск: {e}"))?;
-        }
-        Ok(())
     }
-    #[cfg(not(windows))]
-    {
-        let _ = enabled;
-        Err("Автозапуск доступен только в Windows.".into())
+    if enabled && current.is_none() {
+        fs::create_dir_all(path.parent().expect("autostart has parent"))
+            .map_err(|e| format!("Не удалось создать каталог автозапуска: {e}"))?;
+        let mut file = fs::OpenOptions::new()
+            .write(true).create_new(true).mode(0o600)
+            .open(&path)
+            .map_err(|e| format!("Не удалось создать запись автозапуска: {e}"))?;
+        file.write_all(value.as_bytes())
+            .map_err(|e| format!("Не удалось сохранить автозапуск: {e}"))?;
+    } else if !enabled && current.is_some() {
+        fs::remove_file(path)
+            .map_err(|e| format!("Не удалось выключить автозапуск: {e}"))?;
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1694,18 +1660,11 @@ pub fn open_external_url(url: String) -> Result<(), String> {
         );
     }
 
-    #[cfg(windows)]
-    {
-        std::process::Command::new("rundll32.exe")
-            .args(["url.dll,FileProtocolHandler", parsed.as_str()])
-            .spawn()
-            .map(|_| ())
-            .map_err(|e| format!("Не удалось открыть ссылку в браузере: {e}"))
-    }
-    #[cfg(not(windows))]
-    {
-        Err("Открытие внешних ссылок поддерживается в Windows-приложении.".into())
-    }
+    std::process::Command::new("xdg-open")
+        .arg(parsed.as_str())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Не удалось открыть ссылку в браузере: {e}"))
 }
 
 #[cfg(test)]
